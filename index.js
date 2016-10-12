@@ -7,7 +7,7 @@ const hyperlog = require('hyperlog')
 const debug = require('debug')('lockbox')
 const moment = require('moment')
 
-const fields = ['name', 'lockerboxID', 'studentID', 'semester']
+const fields = ['lockerboxID', 'name', 'studentID', 'semester']
 const db = levelup('lockbox', {db: localstorage})
 const app = choo()
 const get = query => {
@@ -19,16 +19,41 @@ const get = query => {
   return document.querySelectorAll(query)[0].value
 }
 
+const state = {
+  log: hyperlog(db, {valueEncoding: 'json'}),
+  transactions: []
+}
+
 app.model({
-  state: {
-    hyperlog: hyperlog(db),
-    lockboxes: []
+  state,
+  effects: {
+    add: (data, state, send, done) => {
+      state.log.heads((err, heads) => {
+        if (err) debug(err)
+        if (heads.length > 1) throw new Error('handle me')
+        data.moment = moment()._d
+        state.log.add(
+          heads[0] ? [heads[0].key] : null,
+          data,
+          (err, node) => { if (err) done(err) }
+        )
+      })
+    }
   },
+  subscriptions: [
+    function subscribeToHyperlogChanges (send, done) {
+      var reducer = send
+      var changeStream = state.log.createReadStream({live: true})
+      changeStream.on('data', node => {
+        reducer('addToState', node.value, err => err && done(err))
+      })
+    }
+  ],
   reducers: {
-    add: (data, state) => {
-      data.moment = moment()._d
+    addToState: (data, state) => {
+      console.log('reducers')
       return Object.assign(state, {
-        lockboxes: [].concat(state.lockboxes, data)
+        transactions: [].concat(state.transactions, data)
       })
     }
   }
@@ -46,6 +71,14 @@ const mainView = (state, prev, send) => {
     <main class=${style}>
       <h2>Register lockbox</h2>
       <form>
+        <label>
+          <span>Transaction type</span>
+          <select class='transaction_type'>
+            <option value=claim>Claim</option>
+            <option value=unclaim>Modify</option>
+            <option value=unclaim>Unclaim</option>
+          </select>
+        </label>
         <label>
           <span>Lockerbox ID:</span>
           <input type=number class='lockerboxID'>
@@ -68,24 +101,26 @@ const mainView = (state, prev, send) => {
           fields.forEach(elem => {
             form[elem] = get('input.' + elem)
           })
+          form.transactionType = get('select.transaction_type')
           reducer('add', form)
           e.preventDefault()
         }}>
       </form>
 
-      <h2>Overview</h2>
+      <h2>Transactions</h2>
       <ol>
         ${
-          state.lockboxes.map(lockbox => {
+          state.transactions.map(lockbox => {
             return html`<li>
-              ${
+              <b>${lockbox.transactionType}</b>:
+              <pre>{${
                 fields.map((field, i) => {
-                  if (!lockbox[field]) lockbox[field] = ' -'
-                  if (i === 0) return html`<b>${lockbox[field]}</b>`
-                  return ', ' + lockbox[field]
+                  if (!lockbox[field]) lockbox[field] = `-`
+                  if (i === 0) return html`<b>${field}: ${lockbox[field]}</b>`
+                  return `,\n${field}: ${lockbox[field]}`
                 })
-              }, ${moment(lockbox.moment).format('MMMM Do YYYY, h:mm:ss a')}
-            </li>`
+              },\n${`moment: ` + moment(lockbox.moment).format('MMMM Do YYYY, h:mm:ss a')}}
+            </pre></li>`
           })
         }
       </ol>
@@ -97,5 +132,6 @@ app.router(route => [
   route('/', mainView)
 ])
 
+debug('app start')
 const tree = app.start()
 document.body.appendChild(tree)
