@@ -7,10 +7,10 @@ const hyperlog = require('hyperlog')
 const debug = require('debug')('lockbox')
 const moment = require('moment')
 
-const fields = ['lockerboxID', 'name', 'studentID', 'semester']
+const fields = ['boxID', 'building', 'studentName', 'studentID', 'semester']
 const db = levelup('lockbox', {db: localstorage})
 const app = choo()
-const get = query => {
+const getValueOf = query => {
   let result = document.querySelectorAll(query)
   if (result.length !== 1) {
     debug(`Couldn't find exactly one occurence for "${query}"`)
@@ -21,22 +21,33 @@ const get = query => {
 
 const state = {
   log: hyperlog(db, {valueEncoding: 'json'}),
-  transactions: []
+  transactions: [],
+  lockboxes: {ab: [], nb: []}
 }
+window.state = state
 
 app.model({
   state,
   effects: {
     add: (data, state, send, done) => {
+      let reducer = send
+      console.log(data, state, send)
+      // data = {building, boxID, student}
+      console.assert(data && data.building && data.boxID && data.studentID && data.semester, data)
+
       state.log.heads((err, heads) => {
         if (err) debug(err)
-        if (heads.length > 1) throw new Error('handle me')
+        let head = heads.find(head => head.value.building === data.building && head.value.boxID === data.boxID)
+        if (!head) head = {key: null}
+
         data.moment = moment()._d
-        state.log.add(
-          heads[0] ? [heads[0].key] : null,
-          data,
-          (err, node) => { if (err) done(err) }
-        )
+        state.log.add(head.key, data, (err, node) => {
+          if (err) {
+            done(err)
+            return
+          }
+          reducer('updateLockboxState', data, err => err && done(err))
+        })
       })
     }
   },
@@ -45,87 +56,89 @@ app.model({
       var reducer = send
       var changeStream = state.log.createReadStream({live: true})
       changeStream.on('data', node => {
-        reducer('addToState', node.value, err => err && done(err))
+        reducer('updateLockboxState', node.value, err => err && done(err))
       })
     }
   ],
   reducers: {
-    addToState: (data, state) => {
-      console.log('reducers')
-      return Object.assign(state, {
-        transactions: [].concat(state.transactions, data)
-      })
+    updateLockboxState: (data, state) => {
+      state.lockboxes[data.building][data.boxID] = data
+      return state
     }
   }
 })
 
 const mainView = (state, prev, send) => {
-  const reducer = send
+  // const reducer = send
+  const effect = send
   // const effect = send
   let style = sf`
     label {
       display: block;
     }
   `
-  return html`
-    <main class=${style}>
-      <h2>Register lockbox</h2>
-      <form>
-        <label>
-          <span>Transaction type</span>
-          <select class='transaction_type'>
-            <option value=claim>Claim</option>
-            <option value=unclaim>Modify</option>
-            <option value=unclaim>Unclaim</option>
-          </select>
-        </label>
-        <label>
-          <span>Lockerbox ID:</span>
-          <input type=number class='lockerboxID'>
-        </label>
-        <label>
-          <span>Student name:</span>
-          <input type=text placeholder='Name' class='name'>
-        </label>
-        <label>
-          <span>Student ID:</span>
-          <input type=text placeholder='Student ID' class='studentID'>
-        </label>
-        <label>
-          <span>Semester:</span>
-          <input type=number class='semester'>
-        </label>
+  let sendForm = e => {
+    let data = {}
+    fields.forEach(field => {
+      data[field] = getValueOf('input.' + field)
+    })
+    data.transactionType = getValueOf('select.transaction_type')
+    data.building = getValueOf('select.building')
+    console.assert(data && data.building && data.boxID && data.studentID && data.semester)
 
-        <input type=submit value='Add' onclick=${e => {
-          let form = {}
-          fields.forEach(elem => {
-            form[elem] = get('input.' + elem)
-          })
-          form.transactionType = get('select.transaction_type')
-          reducer('add', form)
-          e.preventDefault()
-        }}>
-      </form>
+    effect('add', data)
+    e.preventDefault()
+  }
 
-      <h2>Transactions</h2>
+  return html`<main class=${style}>
+    <h2>Register lockbox</h2>
+    <form>
+      <label>
+        <span>Transaction type</span>
+        <select class='transaction_type'>
+          <option value='claim'>Claim</option>
+          <option value='unclaim'>Modify</option>
+          <option value='unclaim'>Unclaim</option>
+        </select>
+      </label>
+      <label>
+        <span>Building</span>
+        <select class='building'>
+          <option value='ab'>Altbau</option>
+          <option value='nb'>Neubau</option>
+        </select>
+      </label>
+      <label>
+        <span>Lockerbox ID:</span>
+        <input type=number class='boxID'>
+      </label>
+      <label>
+        <span>Student name:</span>
+        <input type=text placeholder='Name' class='studentName'>
+      </label>
+      <label>
+        <span>Student ID:</span>
+        <input type=text placeholder='Student ID' class='studentID'>
+      </label>
+      <label>
+        <span>Semester:</span>
+        <input type=number class='semester'>
+      </label>
+
+      <input type=submit value='Add' onclick=${sendForm}>
+    </form>
+
+    <h2>State of lockboxes</h2>
+    ${['ab', 'nb'].map(building => html`<section>
+      <h2>${building}</h2>
       <ol>
-        ${
-          state.transactions.map(lockbox => {
-            return html`<li>
-              <b>${lockbox.transactionType}</b>:
-              <pre>{${
-                fields.map((field, i) => {
-                  if (!lockbox[field]) lockbox[field] = `-`
-                  if (i === 0) return html`<b>${field}: ${lockbox[field]}</b>`
-                  return `,\n${field}: ${lockbox[field]}`
-                })
-              },\n${`moment: ` + moment(lockbox.moment).format('MMMM Do YYYY, h:mm:ss a')}}
-            </pre></li>`
-          })
-        }
+        ${state.lockboxes[building].map(box => html`<div>
+          <span>#<b>${box.boxID}</b>:</span>
+          <span>${box.studentName}, ${box.studentID}</span>
+        </div>`)}
       </ol>
-    </main>
-  `
+    </section>`)}
+  </main>`
 }
 
 app.router(route => [
